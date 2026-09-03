@@ -1,0 +1,6 @@
+# FixEight main CPU dependencies. Shared JTFrame RAM/clock helpers remain in
+# rtl/jtframe.qip; these files are intentionally restored and read-only.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/modules/fx68k/hdl/uaddrPla.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/modules/fx68k/hdl/fx68kAlu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/modules/fx68k/hdl/fx68k.sv
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/cpu/jtframe_68kdtack_cen.v

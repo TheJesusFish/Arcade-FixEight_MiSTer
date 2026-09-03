@@ -1,0 +1,21 @@
+# Repository-owned source and manifests use deterministic LF.
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+*.sv text eol=lf
+*.svh text eol=lf
+*.v text eol=lf
+*.vhd text eol=lf
+*.qsf text eol=lf
+*.qpf text eol=lf
+*.sdc text eol=lf
+*.qip text eol=lf
+*.mra text eol=lf
+*.sha256 text eol=lf
+
+# Preserve audited protected trees byte-for-byte across Windows checkouts.
+# These last-match overrides intentionally follow the extension rules above.
+/sys/** -text
+/rtl/modules/** -text

@@ -1,0 +1,11 @@
+set_global_assignment -name QIP_FILE rtl/jtframe.qip
+set_global_assignment -name QIP_FILE rtl/game.qip
+set_global_assignment -name QIP_FILE rtl/fixeight/fixeight.qip
+set_global_assignment -name SYSTEMVERILOG_FILE Arcade-FixEight.sv
+set_global_assignment -name SDC_FILE Arcade-FixEight.sdc
+
+# Resolve upstream initialization filenames without copying ROM or microcode
+# payloads into the project root.
+set_global_assignment -name SEARCH_PATH rtl/modules/jtframe/bin
+set_global_assignment -name SEARCH_PATH rtl/modules/jt6295/hdl
+set_global_assignment -name SEARCH_PATH rtl/modules/fx68k/hdl
