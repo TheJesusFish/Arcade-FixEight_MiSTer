@@ -26,11 +26,14 @@ module fixeight_shared_state_port #(
     output logic        ss_ack
 );
 
-localparam logic [2:0] IDLE             = 3'd0;
-localparam logic [2:0] READ_EVEN        = 3'd1;
-localparam logic [2:0] READ_ODD_WAIT    = 3'd2;
-localparam logic [2:0] READ_ODD_CAPTURE = 3'd3;
-localparam logic [2:0] WRITE_ODD        = 3'd4;
+localparam logic [2:0] IDLE              = 3'd0;
+localparam logic [2:0] READ_EVEN_WAIT    = 3'd1;
+localparam logic [2:0] READ_EVEN_CAPTURE = 3'd2;
+localparam logic [2:0] READ_ODD_WAIT     = 3'd3;
+localparam logic [2:0] READ_ODD_CAPTURE  = 3'd4;
+localparam logic [2:0] WRITE_EVEN        = 3'd5;
+localparam logic [2:0] WRITE_ODD         = 3'd6;
+localparam logic [2:0] WAIT_RELEASE      = 3'd7;
 
 logic [2:0] state;
 logic [13:0] word_addr;
@@ -48,25 +51,23 @@ always_comb begin
     ram_data = normal_data;
 
     case (state)
-        IDLE: begin
-            if (access) begin
-                ram_addr = {ss_addr[13:0], 1'b0};
-                ram_data = ss_data[15:8];
-                ram_we = ss_write && restore_enable;
-            end
-        end
-
-        READ_EVEN:
+        READ_EVEN_WAIT,
+        READ_EVEN_CAPTURE:
             ram_addr = {word_addr, 1'b0};
 
         READ_ODD_WAIT,
         READ_ODD_CAPTURE:
             ram_addr = {word_addr, 1'b1};
 
-        default: begin
-            ram_addr = {word_addr, 1'b1};
-            ram_data = write_word[7:0];
+        WRITE_EVEN,
+        WRITE_ODD: begin
+            ram_addr = {word_addr, state == WRITE_ODD};
+            ram_data = state == WRITE_ODD ? write_word[7:0] :
+                                             write_word[15:8];
             ram_we = restore_enable;
+        end
+
+        default: begin
         end
     endcase
 end
@@ -92,16 +93,21 @@ always_ff @(posedge clk) begin
                     write_word <= ss_data[15:0];
                     if (ss_write) begin
                         if (restore_enable)
-                            state <= WRITE_ODD;
+                            state <= WRITE_EVEN;
                         else
                             ss_ack <= 1'b1;
                     end else begin
-                        state <= READ_EVEN;
+                        state <= READ_EVEN_WAIT;
                     end
                 end
             end
 
-            READ_EVEN: begin
+            // jtframe_dual_ram has a registered output.  Keep each address
+            // stable for a full clock before sampling ram_q.
+            READ_EVEN_WAIT:
+                state <= READ_EVEN_CAPTURE;
+
+            READ_EVEN_CAPTURE: begin
                 even_byte <= ram_q;
                 state <= READ_ODD_WAIT;
             end
@@ -112,11 +118,23 @@ always_ff @(posedge clk) begin
             READ_ODD_CAPTURE: begin
                 ss_data_out <= {48'd0, even_byte, ram_q};
                 ss_ack <= 1'b1;
-                state <= IDLE;
+                state <= WAIT_RELEASE;
+            end
+
+            WRITE_EVEN:
+                state <= WRITE_ODD;
+
+            WRITE_ODD: begin
+                ss_ack <= 1'b1;
+                state <= WAIT_RELEASE;
+            end
+
+            WAIT_RELEASE: begin
+                if (!(ss_read || ss_write || ss_query))
+                    state <= IDLE;
             end
 
             default: begin
-                ss_ack <= 1'b1;
                 state <= IDLE;
             end
         endcase

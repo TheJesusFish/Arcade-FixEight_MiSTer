@@ -31,6 +31,7 @@ module fixeight_state_controller #(
     output logic        active,
     output logic [3:0]  state_out,
     output logic        state_hold,
+    output logic        sound_state_hold,
     output logic        state_irq7,
     output logic        state_override,
     output logic        state_reset,
@@ -83,6 +84,9 @@ assign state_hold =
     (state == RESTORE_WAIT_HOLD) ||
     (state == RESTORE_WAIT_STREAM) ||
     (state == RESTORE_HOLD_RESET);
+// Every state owner uses the same proven quiescent interval. The private
+// 68000 handler-exit states intentionally run the V25 as well as the main CPU.
+assign sound_state_hold = state_hold;
 assign cpu_run =
     (state != SAVE_WAIT_HOLD) &&
     (state != SAVE_WAIT_STREAM) &&
@@ -91,8 +95,7 @@ assign cpu_run =
     (state != RESTORE_HOLD_RESET);
 assign restore_capture = state == RESTORE_WAIT_STREAM;
 assign restore_enable =
-    (restore_capture || restore_commit ||
-     (state == RESTORE_HOLD_RESET)) &&
+    (restore_capture || (state == RESTORE_HOLD_RESET)) &&
     format_valid && identity_valid;
 
 wire video_release_point =

@@ -77,13 +77,15 @@ reg [2:0] sprite_row = 3'd0;
 reg [15:0] fetch_lo = 16'd0;
 reg [31:0] fetch_pixels = 32'd0;
 
-reg process_hits_line = 1'b0;
+reg process_active = 1'b0;
 reg [4:0] process_x_chunks = 5'd1;
+reg signed [12:0] process_height = 13'sd0;
 reg [16:0] process_code_base = 17'd0;
 reg [3:0] process_priority = 4'd0;
 reg [5:0] process_color = 6'd0;
 reg process_effective_flip_x = 1'b0;
 reg signed [11:0] process_x_base = 12'sd0;
+reg [8:0] process_position_y = 9'd0;
 reg signed [12:0] process_line_delta = 13'sd0;
 
 reg active_bank = 1'b0;
@@ -181,25 +183,24 @@ wire desc_effective_flip_x = desc_local_flip_x ^ global_flip_x;
 wire desc_effective_flip_y = desc_local_flip_y ^ global_flip_y;
 wire [4:0] desc_x_chunks = {1'b0, desc_x[3:0]} + 5'd1;
 wire [4:0] desc_y_chunks = {1'b0, desc_y[3:0]} + 5'd1;
-wire signed [12:0] target_y_signed = $signed({4'b0000, target_y_latched});
+wire signed [12:0] target_y_signed =
+    $signed({4'b0000, target_y_latched});
 // MAME forms an 18-bit descriptor code and applies modulo 2^16 elements.
 wire [16:0] desc_code_base = {desc_attr[0], desc_code};
 wire signed [11:0] desc_pre_x = wrapped_base(
     desc_position_x, desc_local_flip_x);
-wire signed [11:0] desc_pre_y = wrapped_base(
-    desc_position_y, desc_local_flip_y);
 wire signed [11:0] desc_base_x = global_flip_x ?
     12'sd320 - desc_pre_x : desc_pre_x;
-wire signed [11:0] desc_base_y = global_flip_y ?
-    12'sd240 - desc_pre_y : desc_pre_y;
-wire signed [12:0] desc_base_y_extended = {desc_base_y[11], desc_base_y};
-wire signed [12:0] desc_line_delta = desc_effective_flip_y ?
-    desc_base_y_extended + 13'sd7 - target_y_signed :
-    target_y_signed - desc_base_y_extended;
 wire signed [12:0] desc_height =
     $signed({5'b00000, desc_y_chunks, 3'b000});
-wire desc_hits_line = desc_attr[15] &&
-    (desc_line_delta >= 13'sd0) && (desc_line_delta < desc_height);
+wire signed [11:0] process_wrapped_y = wrapped_base(
+    process_position_y, desc_local_flip_y);
+wire signed [12:0] process_wrapped_y_extended = {
+    process_wrapped_y[11], process_wrapped_y
+};
+wire signed [12:0] process_geometry_base_y = global_flip_y ?
+    13'sd240 - process_wrapped_y_extended :
+    process_wrapped_y_extended;
 wire [3:0] process_row_chunk = process_line_delta[6:3];
 wire [8:0] process_row_code_offset =
     process_row_chunk * process_x_chunks;
@@ -317,13 +318,15 @@ always @(posedge clk) begin
         sprite_row <= 3'd0;
         fetch_lo <= 16'd0;
         fetch_pixels <= 32'd0;
-        process_hits_line <= 1'b0;
+        process_active <= 1'b0;
         process_x_chunks <= 5'd1;
+        process_height <= 13'sd0;
         process_code_base <= 17'd0;
         process_priority <= 4'd0;
         process_color <= 6'd0;
         process_effective_flip_x <= 1'b0;
         process_x_base <= 12'sd0;
+        process_position_y <= 9'd0;
         process_line_delta <= 13'sd0;
         active_bank <= 1'b0;
         build_bank <= 1'b1;
@@ -415,6 +418,12 @@ always @(posedge clk) begin
             ST_DESC_WAIT3: state <= ST_DESC_CAPTURE3;
             ST_DESC_CAPTURE3: begin
                 desc_y <= object_data;
+                // Capture the relative/absolute Y addition while the fourth
+                // descriptor word is already being consumed. This breaks the
+                // old_y-to-line-delta path without adding a descriptor cycle.
+                process_position_y <= desc_attr[14] ?
+                    old_y + object_data[15:7] :
+                    object_data[15:7] - sprite_scroll_y + sprite_y_offset;
                 state <= ST_DESC_PROCESS;
             end
 
@@ -423,14 +432,17 @@ always @(posedge clk) begin
                     old_x <= desc_position_x;
                     old_y <= desc_position_y;
                 end
-                process_hits_line <= desc_hits_line;
+                process_active <= desc_attr[15];
                 process_x_chunks <= desc_x_chunks;
+                process_height <= desc_height;
                 process_code_base <= desc_code_base;
                 process_priority <= desc_attr[11:8];
                 process_color <= desc_attr[7:2];
                 process_effective_flip_x <= desc_effective_flip_x;
                 process_x_base <= desc_base_x;
-                process_line_delta <= desc_line_delta;
+                process_line_delta <= desc_effective_flip_y ?
+                    process_geometry_base_y + 13'sd7 - target_y_signed :
+                    target_y_signed - process_geometry_base_y;
                 // Object RAM is immutable during a line build. Start the
                 // next descriptor read now so its word 0 is waiting once
                 // this descriptor has been accepted or rejected.
@@ -440,7 +452,9 @@ always @(posedge clk) begin
             end
 
             ST_DESC_DECIDE: begin
-                if (process_hits_line) begin
+                if (process_active &&
+                    (process_line_delta >= 13'sd0) &&
+                    (process_line_delta < process_height)) begin
                     sprite_x_base <= process_x_base;
                     sprite_x_chunks <= process_x_chunks;
                     sprite_code_row <= process_code_base +

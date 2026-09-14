@@ -2,6 +2,7 @@
 module fixeight_clock_enables (
     input  logic clk,
     input  logic reset,
+    input  logic audio_hold,
     output logic ce_vdp_27m,
     output logic ce_cpu_16m,
     output logic ce_pixel_6m75,
@@ -59,18 +60,22 @@ always_ff @(posedge clk) begin
             div14 <= div14 + 4'd1;
         end
 
-        if (div28 == 5'd27) begin
-            div28 <= 5'd0;
-            ce_ikaopm_3m375 <= 1'b1;
-        end else begin
-            div28 <= div28 + 5'd1;
+        if (!audio_hold) begin
+            if (div28 == 5'd27) begin
+                div28 <= 5'd0;
+                ce_ikaopm_3m375 <= 1'b1;
+            end else begin
+                div28 <= div28 + 5'd1;
+            end
         end
 
-        if (phase1_sum >= 9'd189) begin
-            phase1 <= phase1_sum[7:0] - 8'd189;
-            ce_oki_1m <= 1'b1;
-        end else begin
-            phase1 <= phase1_sum[7:0];
+        if (!audio_hold) begin
+            if (phase1_sum >= 9'd189) begin
+                phase1 <= phase1_sum[7:0] - 8'd189;
+                ce_oki_1m <= 1'b1;
+            end else begin
+                phase1 <= phase1_sum[7:0];
+            end
         end
     end
 end

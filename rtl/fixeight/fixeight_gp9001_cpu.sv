@@ -84,6 +84,8 @@ reg [9:0]   obj_init_index = 10'd0;
 reg [1:0]   obj_sync_state = OBJ_SYNC_IDLE;
 reg [9:0]   obj_sync_index = 10'd0;
 reg [15:0]  obj_sync_data = 16'd0;
+reg [1:0]   obj_sync_mask = 2'b00;
+reg         obj_buf_start_q = 1'b0;
 reg         obj_sync_start_pending = 1'b0;
 reg         obj_restore_pending = 1'b0;
 reg [1:0]   obj_restore_flags = 2'b00;
@@ -106,10 +108,6 @@ wire [1:0] obj_init_clear_mask = {
 };
 wire obj_sync_copy_write = (obj_sync_state == OBJ_SYNC_WRITE) &&
                            !ram_obj_write;
-wire [1:0] obj_sync_copy_mask = {
-    !obj_staging_dirty_hi[obj_sync_index],
-    !obj_staging_dirty_lo[obj_sync_index]
-};
 wire [9:0] obj_bank0_addr = obj_bank0_cpu_write ? obj_word_index :
                             obj_init_active ? obj_init_index : obj_sync_index;
 wire [9:0] obj_bank1_addr = obj_bank1_cpu_write ? obj_word_index :
@@ -121,11 +119,11 @@ wire [15:0] obj_bank1_data = obj_bank1_cpu_write ? ram_din :
 wire [1:0] obj_bank0_we = obj_bank0_cpu_write ? ram_we :
                           obj_init_clear_write ? obj_init_clear_mask :
                           (obj_sync_copy_write && !obj_staging_bank) ?
-                              obj_sync_copy_mask : 2'b00;
+                              obj_sync_mask : 2'b00;
 wire [1:0] obj_bank1_we = obj_bank1_cpu_write ? ram_we :
                           obj_init_clear_write ? obj_init_clear_mask :
                           (obj_sync_copy_write && obj_staging_bank) ?
-                              obj_sync_copy_mask : 2'b00;
+                              obj_sync_mask : 2'b00;
 wire [15:0] obj_bank0_copy_dout;
 wire [15:0] obj_bank1_copy_dout;
 wire [15:0] obj_bank0_scan_dout;
@@ -169,6 +167,17 @@ assign obj_scan_dout = obj_active_bank ?
                        obj_bank1_scan_dout : obj_bank0_scan_dout;
 assign obj_buf_busy = obj_init_active || obj_sync_start_pending ||
                       (obj_sync_state != OBJ_SYNC_IDLE);
+
+// snapshot_start is decoded from the raster counters and the global state
+// hold.  Register it at the GP9001 boundary: one 94.5 MHz cycle is well inside
+// the 6.75 MHz pixel interval, while this removes that control cone from the
+// object-copy index update path.
+always @(posedge clk) begin
+    if (rst || ss_hold)
+        obj_buf_start_q <= 1'b0;
+    else
+        obj_buf_start_q <= obj_buf_start;
+end
 
 function automatic [15:0] merge_word;
     input [15:0] old_word;
@@ -385,6 +394,7 @@ always @(posedge clk) begin
         obj_sync_state <= OBJ_SYNC_IDLE;
         obj_sync_index <= 10'd0;
         obj_sync_data <= 16'd0;
+        obj_sync_mask <= 2'b00;
         obj_sync_start_pending <= 1'b0;
         obj_restore_pending <= 1'b0;
         obj_restore_flags <= 2'b00;
@@ -402,18 +412,16 @@ always @(posedge clk) begin
         obj_sync_state <= OBJ_SYNC_IDLE;
         obj_sync_index <= 10'd0;
         obj_sync_data <= 16'd0;
+        obj_sync_mask <= 2'b00;
         obj_sync_start_pending <= 1'b0;
         obj_restore_pending <= 1'b0;
         obj_buf_miss <= 1'b0;
         obj_staging_dirty_lo <= 1024'd0;
         obj_staging_dirty_hi <= 1024'd0;
-    end else if (
-        !ss_hold || obj_init_active || obj_sync_start_pending ||
-        (obj_sync_state != OBJ_SYNC_IDLE)
-    ) begin
+    end else begin
         obj_buf_miss <= 1'b0;
 
-        if (obj_buf_start && !ss_hold) begin
+        if (obj_buf_start_q) begin
             if (!obj_init_active && !obj_sync_start_pending &&
                 (obj_sync_state == OBJ_SYNC_IDLE)) begin
                 obj_active_bank <= ~obj_active_bank;
@@ -453,11 +461,33 @@ always @(posedge clk) begin
 
                     OBJ_SYNC_WAIT: begin
                         obj_sync_data <= obj_active_copy_dout;
+                        // Capture the dirty decision beside the copy data so
+                        // the object index is not on the M10K write-enable
+                        // path.  Include a same-cycle CPU write because the
+                        // dirty-vector nonblocking update is not visible yet.
+                        obj_sync_mask[0] <=
+                            !obj_staging_dirty_lo[obj_sync_index] &&
+                            !(ram_obj_write &&
+                              (obj_word_index == obj_sync_index) && ram_we[0]);
+                        obj_sync_mask[1] <=
+                            !obj_staging_dirty_hi[obj_sync_index] &&
+                            !(ram_obj_write &&
+                              (obj_word_index == obj_sync_index) && ram_we[1]);
                         obj_sync_state <= OBJ_SYNC_WRITE;
                     end
 
                     OBJ_SYNC_WRITE: begin
-                        if (!ram_obj_write) begin
+                        if (ram_obj_write) begin
+                            // A collision holds WRITE for another cycle.  If
+                            // it targets this word, suppress the corresponding
+                            // deferred copy byte as well.
+                            if (obj_word_index == obj_sync_index) begin
+                                if (ram_we[0])
+                                    obj_sync_mask[0] <= 1'b0;
+                                if (ram_we[1])
+                                    obj_sync_mask[1] <= 1'b0;
+                            end
+                        end else begin
                             if (obj_sync_index == 10'h3ff) begin
                                 obj_sync_state <= OBJ_SYNC_IDLE;
                             end else begin

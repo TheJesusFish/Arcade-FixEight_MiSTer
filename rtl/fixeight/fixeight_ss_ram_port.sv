@@ -40,34 +40,74 @@ wire in_range =
 wire access = selected && in_range && !ss_query && (ss_read || ss_write);
 wire [31:0] local_addr = ss_addr - SS_BASE;
 
-assign ram_addr = access ? local_addr[ADDR_WIDTH-1:0] : normal_addr;
-assign ram_data = access ? ss_data[WIDTH-1:0] : normal_data;
-assign ram_we = access ?
-                {WE_WIDTH{ss_write && restore_enable}} :
-                normal_we;
+localparam [2:0]
+    SS_IDLE          = 3'd0,
+    SS_WRITE_COMMIT  = 3'd1,
+    SS_READ_WAIT     = 3'd2,
+    SS_READ_CAPTURE  = 3'd3,
+    SS_WAIT_RELEASE  = 3'd4;
 
-reg read_delay = 1'b0;
+reg [2:0] ss_state = SS_IDLE;
+reg [ADDR_WIDTH-1:0] ss_addr_latched = {ADDR_WIDTH{1'b0}};
+reg [WIDTH-1:0] ss_data_latched = {WIDTH{1'b0}};
+reg ss_restore_latched = 1'b0;
+
+wire ss_owns_ram =
+    ss_state == SS_WRITE_COMMIT ||
+    ss_state == SS_READ_WAIT ||
+    ss_state == SS_READ_CAPTURE;
+
+// The shared state bus spans the entire core.  Capture its command beside
+// each RAM before driving the synchronous memory port so read_req/state/address
+// never form a full-core combinational cone into the block-RAM write enables.
+assign ram_addr = ss_owns_ram ? ss_addr_latched : normal_addr;
+assign ram_data = ss_owns_ram ? ss_data_latched : normal_data;
+assign ram_we = ss_state == SS_WRITE_COMMIT ?
+                {WE_WIDTH{ss_restore_latched}} : normal_we;
 
 always @(posedge clk) begin
     ss_ack <= 1'b0;
 
-    if (selected && ss_query && SS_QUERY_OWNER) begin
-        ss_data_out <= {SS_IDX, 22'd0, STREAM_WIDTH, SS_WORD_COUNT};
-        ss_ack <= 1'b1;
-        read_delay <= 1'b0;
-    end else if (access) begin
-        if (ss_write) begin
+    case (ss_state)
+        SS_IDLE: begin
+            if (selected && ss_query && SS_QUERY_OWNER) begin
+                ss_data_out <=
+                    {SS_IDX, 22'd0, STREAM_WIDTH, SS_WORD_COUNT};
+                ss_ack <= 1'b1;
+                ss_state <= SS_WAIT_RELEASE;
+            end else if (access) begin
+                ss_addr_latched <= local_addr[ADDR_WIDTH-1:0];
+                ss_data_latched <= ss_data[WIDTH-1:0];
+                ss_restore_latched <= restore_enable;
+                ss_state <= ss_write ? SS_WRITE_COMMIT : SS_READ_WAIT;
+            end
+        end
+
+        SS_WRITE_COMMIT: begin
+            // ram_we is high throughout the cycle ending at this edge.
             ss_ack <= 1'b1;
-            read_delay <= 1'b0;
-        end else if (read_delay) begin
+            ss_state <= SS_WAIT_RELEASE;
+        end
+
+        SS_READ_WAIT: begin
+            // Present the registered address for one complete synchronous
+            // RAM cycle before sampling its registered output.
+            ss_state <= SS_READ_CAPTURE;
+        end
+
+        SS_READ_CAPTURE: begin
             ss_data_out <= {{(64-WIDTH){1'b0}}, ram_q};
             ss_ack <= 1'b1;
-        end else begin
-            read_delay <= 1'b1;
+            ss_state <= SS_WAIT_RELEASE;
         end
-    end else begin
-        read_delay <= 1'b0;
-    end
+
+        SS_WAIT_RELEASE: begin
+            if (!(ss_read || ss_write || ss_query))
+                ss_state <= SS_IDLE;
+        end
+
+        default: ss_state <= SS_IDLE;
+    endcase
 end
 
 endmodule

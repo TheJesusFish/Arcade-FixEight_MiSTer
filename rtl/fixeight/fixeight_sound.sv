@@ -4,6 +4,8 @@
 module fixeight_sound (
     input  logic               clk,
     input  logic               reset,
+    input  logic               pause,
+    input  logic               pause_hold,
     input  logic               v25_release,
     input  logic               ce_v25,
     input  logic               ce_opm,
@@ -49,6 +51,7 @@ module fixeight_sound (
     output logic               sample,
     output logic               state_idle,
     output logic               state_held,
+    output logic               ready,
     output logic               debug_fault,
     output logic               debug_halted,
     output logic [19:0]        debug_pc,
@@ -64,6 +67,9 @@ localparam logic [19:0] YM_ADDR  = 20'h0000a;
 localparam logic [19:0] YM_DATA  = 20'h0000b;
 localparam logic [19:0] OKI_DATA = 20'h0000c;
 wire sound_domain_reset = reset || ss_restore_commit;
+// Raw pause mutes the external sample stream immediately. The core asserts
+// pause_hold only after the V25, chip bridges, and enable phases are quiescent,
+// and releases it during a save-state drain or restore replay.
 
 logic [5:0] ym_reset_count;
 logic ym_reset;
@@ -125,6 +131,7 @@ always_ff @(posedge clk or posedge sound_domain_reset) begin
 end
 
 assign sound_ready = !ym_reset && oki_ready;
+assign ready = sound_ready;
 always_ff @(posedge clk or posedge reset) begin
     if (reset)
         v25_started <= 1'b0;
@@ -181,7 +188,8 @@ fixeight_v25_cpu #(
     .reset,
     .reset_n(v25_reset_n),
     .clock_enable(
-        ce_v25 && !v25_hold_boundary && !bgm_replay_holds_v25
+        ce_v25 && !pause_hold && !v25_hold_boundary &&
+        !bgm_replay_holds_v25
     ),
     .port0_in({eeprom_do, 7'h00}),
     .port1_in(8'h00),
@@ -339,7 +347,7 @@ always_ff @(posedge clk) begin
         sound_bgm_command <= 8'd0;
         sound_bgm_argument <= 8'd0;
         sound_bgm_valid <= 1'b0;
-    end else begin
+    end else if (!pause_hold) begin
         v25_shared_read_active_q <= v25_shared_read_active;
         v25_shared_read_addr_q <= v25_bus_addr[14:0];
 
@@ -411,10 +419,14 @@ logic [3:0] bgm_replay_state;
 logic [7:0] bgm_replay_command;
 logic [7:0] bgm_replay_argument;
 logic [3:0] bgm_replay_wait_count;
-wire bgm_stop_arg = bgm_replay_state == BGM_STOP_ARG;
-wire bgm_stop_command = bgm_replay_state == BGM_STOP_COMMAND;
-wire bgm_write_arg = bgm_replay_state == BGM_WRITE_ARG;
-wire bgm_write_command = bgm_replay_state == BGM_WRITE_COMMAND;
+wire bgm_stop_arg =
+    (bgm_replay_state == BGM_STOP_ARG) && !pause_hold;
+wire bgm_stop_command =
+    (bgm_replay_state == BGM_STOP_COMMAND) && !pause_hold;
+wire bgm_write_arg =
+    (bgm_replay_state == BGM_WRITE_ARG) && !pause_hold;
+wire bgm_write_command =
+    (bgm_replay_state == BGM_WRITE_COMMAND) && !pause_hold;
 assign bgm_replay_holds_v25 =
     (bgm_replay_state == BGM_WAIT_READY) ||
     (bgm_replay_state == BGM_STOP_ARG) ||
@@ -439,7 +451,7 @@ always_ff @(posedge clk) begin
         bgm_replay_command <= restored_bgm_command;
         bgm_replay_argument <= restored_bgm_argument;
         bgm_replay_wait_count <= 4'd0;
-    end else begin
+    end else if (!pause_hold) begin
         case (bgm_replay_state)
             BGM_WAIT_READY: begin
                 if (!sound_ready)
@@ -488,7 +500,7 @@ assign shared_dout =
 assign shared_we =
     bgm_stop_arg || bgm_stop_command ||
     bgm_write_arg || bgm_write_command ||
-    (v25_write_start && v25_shared_cs);
+    (v25_write_start && v25_shared_cs && !pause_hold);
 
 logic [7:0] ym_dout;
 logic [7:0] oki_dout;
@@ -534,7 +546,7 @@ always_ff @(posedge clk) begin
         debug_ym_data <= 8'h00;
         debug_oki_write <= 1'b0;
         debug_oki_data <= 8'h00;
-    end else begin
+    end else if (!pause_hold) begin
         v25_write_active_q <= v25_write_active;
         oki_wr_n <= 1'b1;
         debug_ym_write <= 1'b0;
@@ -570,6 +582,11 @@ always_ff @(posedge clk) begin
                 debug_oki_data <= v25_bus_dout;
             end
         end
+    end else begin
+        // Diagnostic write indicators are pulses, not bridge state. Keep them
+        // quiet while the functional transaction itself remains held.
+        debug_ym_write <= 1'b0;
+        debug_oki_write <= 1'b0;
     end
 end
 
@@ -607,6 +624,8 @@ jt6295 #(.INTERPOL(0)) u_oki6295 (
     .sample(oki_sample)
 );
 
+logic signed [15:0] mixed_mono;
+
 fixeight_sound_mixer u_mixer (
     .clk,
     .reset(sound_domain_reset || ym_reset),
@@ -618,9 +637,10 @@ fixeight_sound_mixer u_mixer (
     .oki_enable,
     .fx_level,
     .oki_ready,
-    .mono(snd_mono)
+    .mono(mixed_mono)
 );
 
+assign snd_mono = pause ? 16'sd0 : mixed_mono;
 assign sample = ym_sample;
 assign state_idle =
     v25_state_idle && !v25_write_active && !ym_write_pending &&
@@ -632,5 +652,4 @@ assign ss_data_out =
     eeprom_ss_ack ? eeprom_ss_data_out :
     v25_ss_ack ? v25_ss_data_out :
     intent_ss_ack ? intent_ss_data_out : 64'd0;
-
 endmodule

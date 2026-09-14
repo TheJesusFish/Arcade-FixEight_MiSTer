@@ -59,6 +59,7 @@ module fixeight_core (
     input  logic [15:0]  eeprom_seed_data,
 
     input  logic         state_hold,
+    input  logic         sound_state_hold,
     input  logic         state_irq7,
     input  logic         state_override,
     input  logic         state_reset,
@@ -118,6 +119,29 @@ logic ce_cpu;
 logic ce_pixel;
 logic ce_opm;
 logic ce_oki;
+logic sound_ready;
+logic sound_state_idle;
+logic sound_state_held;
+logic sound_pause_held;
+wire sound_pause = !halt_n;
+// Mute immediately, but only freeze the sound domain after every owner and
+// clock enable has reached a quiescent boundary. This avoids stranding a YM,
+// OKI, or V25 transaction when pause is asserted between enable pulses.
+wire sound_pause_quiescent =
+    sound_ready && sound_state_idle &&
+    !ce_cpu && !ce_opm && !ce_oki;
+// A save-state hold must be able to drain or replay the sound bus even if the
+// user requested pause, while the externally visible output remains muted.
+wire sound_pause_freeze =
+    !sound_state_hold &&
+    (sound_pause_held || (sound_pause && sound_pause_quiescent));
+
+always_ff @(posedge clk) begin
+    if (clock_reset || reset || !sound_pause)
+        sound_pause_held <= 1'b0;
+    else if (!sound_state_hold && sound_pause_quiescent)
+        sound_pause_held <= 1'b1;
+end
 
 fixeight_clock_enables u_enables (
     .clk,
@@ -125,6 +149,7 @@ fixeight_clock_enables u_enables (
     // enable divider alive during game reset so that handshake cannot
     // deadlock; only the independent cold reset may stop it.
     .reset(clock_reset),
+    .audio_hold(sound_pause_freeze),
     .ce_vdp_27m(ce_vdp),
     .ce_cpu_16m(ce_cpu),
     .ce_pixel_6m75(ce_pixel),
@@ -490,14 +515,14 @@ end
 
 logic [63:0] sound_ss_data_out;
 logic sound_ss_ack;
-logic sound_state_idle;
-logic sound_state_held;
 logic sound_fault;
 logic sound_halted;
 
 fixeight_sound u_sound (
     .clk,
     .reset,
+    .pause(sound_pause),
+    .pause_hold(sound_pause_freeze),
     .v25_release,
     .ce_v25(ce_cpu),
     .ce_opm,
@@ -523,7 +548,7 @@ fixeight_sound u_sound (
     .oki_rom_addr,
     .oki_rom_data,
     .oki_rom_ok(oki_rom_ack),
-    .state_hold,
+    .state_hold(sound_state_hold),
     .ss_restore_enable,
     .ss_restore_commit,
     .ss_data,
@@ -538,6 +563,7 @@ fixeight_sound u_sound (
     .sample(audio_sample),
     .state_idle(sound_state_idle),
     .state_held(sound_state_held),
+    .ready(sound_ready),
     .debug_fault(sound_fault),
     .debug_halted(sound_halted),
     .debug_pc(debug_v25_pc),

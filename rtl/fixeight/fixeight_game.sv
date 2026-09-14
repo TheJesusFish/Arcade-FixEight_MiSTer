@@ -317,6 +317,7 @@ logic debug_frame_epoch;
 logic debug_frame_tick;
 
 logic state_hold;
+logic sound_state_hold;
 logic state_irq7;
 logic state_override;
 logic state_reset;
@@ -402,6 +403,7 @@ fixeight_state_controller u_state_controller (
     .active(ss_active),
     .state_out(ss_state_out),
     .state_hold,
+    .sound_state_hold,
     .state_irq7,
     .state_override,
     .state_reset,
@@ -500,6 +502,7 @@ fixeight_core u_core (
     .eeprom_seed_addr,
     .eeprom_seed_data,
     .state_hold,
+    .sound_state_hold,
     .state_irq7,
     .state_override,
     .state_reset,

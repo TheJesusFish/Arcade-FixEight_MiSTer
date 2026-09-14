@@ -52,6 +52,9 @@ module memory_stream #(parameter COUNT = 32)
         QUERY_SCATTER_WAIT,
         READ_HEADER,
         READ_HEADER_WAIT,
+        READ_HEADER_DECODE,
+        VALIDATE_MEM_DECODE,
+        READ_MEM_DECODE,
         WRITE_HEADER_SIZE,
         WRITE_HEADER_SIZE_WAIT,
         WRITE_HEADER_CHANGE,
@@ -71,6 +74,7 @@ module memory_stream #(parameter COUNT = 32)
     reg [31:0] current_addr;
     reg [2:0]  word_counter;  // 0-7 for tracking position in 64-bit word
     reg [63:0] buffer;        // Buffer for read/write operations
+    reg [63:0] ddr_rdata_latched;
     reg [31:0] chunk_remaining;
     reg [3:0]  query_delay;
     reg [1:0]  chunk_width;
@@ -137,6 +141,7 @@ module memory_stream #(parameter COUNT = 32)
             validate_crc_descriptor <= 1'b0;
             crc_byte_counter <= 3'd0;
             crc_shift <= 64'd0;
+            ddr_rdata_latched <= 64'd0;
         end
         else begin
             case (state)
@@ -186,25 +191,30 @@ module memory_stream #(parameter COUNT = 32)
                     if (~ddr.busy) begin
                         ddr.read <= 0;
                         if (ddr.rdata_ready) begin
-                            header_data <= ddr.rdata;
-
-                            if (is_reading) begin
-                                end_addr <= current_addr +
-                                    { ddr.rdata[61:32], 2'b00 };
-                                if (
-                                    ({ddr.rdata[61:32], 2'b00} >=
-                                     32'd16) &&
-                                    ({ddr.rdata[61:32], 2'b00} <=
-                                     (length - 32'd8)) &&
-                                    (ddr.rdata[32] == 1'b0)
-                                )
-                                    state <= VALIDATE_MEM_REQ;
-                                else
-                                    state <= IDLE;
-                            end else begin
-                                state <= QUERY_GATHER_FIRST;
-                            end
+                            ddr_rdata_latched <= ddr.rdata;
+                            state <= READ_HEADER_DECODE;
                         end
+                    end
+                end
+
+                READ_HEADER_DECODE: begin
+                    header_data <= ddr_rdata_latched;
+
+                    if (is_reading) begin
+                        end_addr <= current_addr +
+                            { ddr_rdata_latched[61:32], 2'b00 };
+                        if (
+                            ({ddr_rdata_latched[61:32], 2'b00} >=
+                             32'd16) &&
+                            ({ddr_rdata_latched[61:32], 2'b00} <=
+                             (length - 32'd8)) &&
+                            (ddr_rdata_latched[32] == 1'b0)
+                        )
+                            state <= VALIDATE_MEM_REQ;
+                        else
+                            state <= IDLE;
+                    end else begin
+                        state <= QUERY_GATHER_FIRST;
                     end
                 end
 
@@ -280,68 +290,73 @@ module memory_stream #(parameter COUNT = 32)
                     if (!ddr.busy) begin
                         ddr.read <= 1'b0;
                         if (ddr.rdata_ready) begin
-                            if (validate_expect_sentinel) begin
-                                if (
-                                    (ddr.rdata[31:0] ==
-                                     ~validate_crc_work) &&
-                                    (ddr.rdata[63:32] ==
-                                     32'hffffffff) &&
-                                    (current_addr == end_addr)
-                                ) begin
-                                    current_addr <= start_addr + 32'd8;
-                                    chunk_remaining <= 32'd0;
-                                    chunk_index <= 0;
-                                    word_counter <= 0;
-                                    state <= READ_MEM_REQ;
-                                end else begin
-                                    state <= IDLE;
-                                end
-                            end else if (validate_expect_descriptor) begin
-                                if (
-                                    (ddr.rdata[63:56] ==
-                                     validate_expected_index) &&
-                                    (ddr.rdata[55:34] == 22'd0) &&
-                                    (ddr.rdata[31:0] != 32'd0) &&
-                                    (ddr.rdata[33:32] <= 2'd3)
-                                ) begin
-                                    chunk_index <=
-                                        ddr.rdata[56+CHUNK_BITS-1:56];
-                                    chunk_remaining <= ddr.rdata[31:0];
-                                    chunk_width <= ddr.rdata[33:32];
-                                    validate_data_words <=
-                                        ((ddr.rdata[31:0] <<
-                                          ddr.rdata[33:32]) +
-                                         32'd7) >> 3;
-                                    crc_shift <= ddr.rdata;
-                                    crc_byte_counter <= 3'd0;
-                                    validate_crc_descriptor <= 1'b1;
-                                    state <= VALIDATE_CRC;
-                                end else begin
-                                    state <= IDLE;
-                                end
-                            end else begin
-                                crc_shift <= ddr.rdata;
-                                crc_byte_counter <= 3'd0;
-                                validate_crc_descriptor <= 1'b0;
-                                if (validate_data_words == 32'd1) begin
-                                    validate_data_words <= 32'd0;
-                                    if (
-                                        validate_expected_index ==
-                                        COUNT - 1
-                                    ) begin
-                                        validate_expect_sentinel <= 1'b1;
-                                    end else begin
-                                        validate_expected_index <=
-                                            validate_expected_index + 8'd1;
-                                        validate_expect_descriptor <= 1'b1;
-                                    end
-                                end else begin
-                                    validate_data_words <=
-                                        validate_data_words - 32'd1;
-                                end
-                                state <= VALIDATE_CRC;
-                            end
+                            ddr_rdata_latched <= ddr.rdata;
+                            state <= VALIDATE_MEM_DECODE;
                         end
+                    end
+                end
+
+                VALIDATE_MEM_DECODE: begin
+                    if (validate_expect_sentinel) begin
+                        if (
+                            (ddr_rdata_latched[31:0] ==
+                             ~validate_crc_work) &&
+                            (ddr_rdata_latched[63:32] ==
+                             32'hffffffff) &&
+                            (current_addr == end_addr)
+                        ) begin
+                            current_addr <= start_addr + 32'd8;
+                            chunk_remaining <= 32'd0;
+                            chunk_index <= 0;
+                            word_counter <= 0;
+                            state <= READ_MEM_REQ;
+                        end else begin
+                            state <= IDLE;
+                        end
+                    end else if (validate_expect_descriptor) begin
+                        if (
+                            (ddr_rdata_latched[63:56] ==
+                             validate_expected_index) &&
+                            (ddr_rdata_latched[55:34] == 22'd0) &&
+                            (ddr_rdata_latched[31:0] != 32'd0) &&
+                            (ddr_rdata_latched[33:32] <= 2'd3)
+                        ) begin
+                            chunk_index <=
+                                ddr_rdata_latched[56+CHUNK_BITS-1:56];
+                            chunk_remaining <= ddr_rdata_latched[31:0];
+                            chunk_width <= ddr_rdata_latched[33:32];
+                            validate_data_words <=
+                                ((ddr_rdata_latched[31:0] <<
+                                  ddr_rdata_latched[33:32]) +
+                                 32'd7) >> 3;
+                            crc_shift <= ddr_rdata_latched;
+                            crc_byte_counter <= 3'd0;
+                            validate_crc_descriptor <= 1'b1;
+                            state <= VALIDATE_CRC;
+                        end else begin
+                            state <= IDLE;
+                        end
+                    end else begin
+                        crc_shift <= ddr_rdata_latched;
+                        crc_byte_counter <= 3'd0;
+                        validate_crc_descriptor <= 1'b0;
+                        if (validate_data_words == 32'd1) begin
+                            validate_data_words <= 32'd0;
+                            if (
+                                validate_expected_index ==
+                                COUNT - 1
+                            ) begin
+                                validate_expect_sentinel <= 1'b1;
+                            end else begin
+                                validate_expected_index <=
+                                    validate_expected_index + 8'd1;
+                                validate_expect_descriptor <= 1'b1;
+                            end
+                        end else begin
+                            validate_data_words <=
+                                validate_data_words - 32'd1;
+                        end
+                        state <= VALIDATE_CRC;
                     end
                 end
 
@@ -396,23 +411,29 @@ module memory_stream #(parameter COUNT = 32)
                     if (!ddr.busy) begin
                         ddr.read <= 0;
                         if (ddr.rdata_ready) begin
-                            buffer <= ddr.rdata;
-                            if (chunk_remaining == 0) begin
-                                if (&ddr.rdata[63:56]) begin
-                                    state <= IDLE;
-                                end else begin
-                                    chunk_remaining <= ddr.rdata[31:0];
-                                    chunk_width <= ddr.rdata[33:32];
-                                    chunk_index <= ddr.rdata[56+CHUNK_BITS-1:56];
-                                    write_req <= 1;
-                                    query_req <= 1;
-                                    query_delay <= 0;
-                                    state <= QUERY_SCATTER_WAIT;
-                                end
-                            end else begin
-                                state <= READ_STREAM;
-                            end
+                            ddr_rdata_latched <= ddr.rdata;
+                            state <= READ_MEM_DECODE;
                         end
+                    end
+                end
+
+                READ_MEM_DECODE: begin
+                    buffer <= ddr_rdata_latched;
+                    if (chunk_remaining == 0) begin
+                        if (&ddr_rdata_latched[63:56]) begin
+                            state <= IDLE;
+                        end else begin
+                            chunk_remaining <= ddr_rdata_latched[31:0];
+                            chunk_width <= ddr_rdata_latched[33:32];
+                            chunk_index <=
+                                ddr_rdata_latched[56+CHUNK_BITS-1:56];
+                            write_req <= 1;
+                            query_req <= 1;
+                            query_delay <= 0;
+                            state <= QUERY_SCATTER_WAIT;
+                        end
+                    end else begin
+                        state <= READ_STREAM;
                     end
                 end
 
