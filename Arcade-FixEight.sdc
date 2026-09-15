@@ -54,4 +54,16 @@ set_false_path -to emu:emu|jtframe_board:u_board|jtframe_reset:u_reset|rst_req_s
 set_false_path -from FB_EN
 set_false_path -to deb_osd[0]
 set_false_path -from emu:emu|jtframe_board:u_board|jtframe_led:u_led|led
+# Every register in the hq2x blender advances on ce_x4i. sys/scandoubler.v
+# places it at pc_in == pixsz4, pixsz2, pixsz2+pixsz4 and pixsz, so the minimum
+# gap is floor(pixsz/4). ce_pixel_6m75 is an exact one-in-fourteen divider
+# (fixeight_clock_enables.sv:56, div14==13) and pixel_tick gates it further with
+# !hold, which can only suppress ticks, never shorten the interval. The measured
+# pixsz is therefore always >= 14 and the gap always >= 3. Does not hold before
+# pixsz is first measured, which is display-only and self-clears. Scoped to
+# blender-internal paths so the other scandoubler enables stay honest.
+set hq2x_keepers [get_keepers {*|Hq2x:Hq2x|Blend:blender|*}]
+set_multicycle_path -setup -from $hq2x_keepers -to $hq2x_keepers 3
+set_multicycle_path -hold  -from $hq2x_keepers -to $hq2x_keepers 2
+
 set_false_path -to [get_keepers {*altera_std_synchronizer:*|din_s1}]
