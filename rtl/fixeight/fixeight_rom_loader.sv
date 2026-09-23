@@ -158,27 +158,31 @@ logic [26:0] local_byte_addr;
 logic [21:0] local_word_addr;
 logic [21:0] graphics_word_addr;
 logic [1:0] target_bank;
-logic write_low_lane;
+logic [1:0] target_region;
+logic [AW-1:0] target_word_addr;
+logic pair_valid;
+logic [7:0] pair_even_data;
+logic [1:0] pair_bank;
+logic [1:0] pair_region;
+logic [AW-1:0] pair_word_addr;
 
 always_comb begin
     if (in_program) begin
         local_byte_addr = ioctl_addr;
         target_bank = 2'd0;
+        target_region = 2'd0;
     end else if (in_graphics) begin
         local_byte_addr = ioctl_addr - PROGRAM_END;
         target_bank = 2'd1;
+        target_region = 2'd1;
     end else begin
         local_byte_addr = ioctl_addr - GRAPHICS_END;
         target_bank = 2'd2;
+        target_region = 2'd2;
     end
     local_word_addr = local_byte_addr[22:1];
-
-    // Program and graphics bytes are already in final big-endian word order
-    // in the aggregate, so byte 0 occupies the upper word lane. JT6295's
-    // byte reader selects address 0 from the lower SDRAM lane, so OKI uses
-    // the opposite lane mapping.
-    write_low_lane = in_oki ? ~local_byte_addr[0] :
-                              local_byte_addr[0];
+    target_word_addr = in_graphics ?
+        graphics_word_addr[AW-1:0] : local_word_addr[AW-1:0];
 end
 
 fixeight_gfx_repack u_gfx_repack (
@@ -191,7 +195,7 @@ assign prog_rd = 1'b0;
 // falling download request.  Without the registered request term there is
 // a half-cycle low gap before finalize_pending is set.
 assign dwnld_busy =
-    ioctl_rom || ioctl_rom_q || prog_we || finalize_pending;
+    ioctl_rom || ioctl_rom_q || prog_we || pair_valid || finalize_pending;
 
 always_ff @(posedge clk) begin
     ioctl_rom_q <= ioctl_rom;
@@ -212,6 +216,11 @@ always_ff @(posedge clk) begin
         prog_data <= 16'd0;
         prog_mask <= 2'b11;
         prog_we <= 1'b0;
+        pair_valid <= 1'b0;
+        pair_even_data <= 8'd0;
+        pair_bank <= 2'd0;
+        pair_region <= 2'd0;
+        pair_word_addr <= {AW{1'b0}};
         eeprom_seed_addr <= 6'd0;
         eeprom_seed_data <= 16'd0;
         eeprom_word_count <= 7'd0;
@@ -231,6 +240,7 @@ always_ff @(posedge clk) begin
             image_set_id <= 4'd15;
             image_eeprom_crc32 <= 32'd0;
             image_aggregate_sha256 <= 256'd0;
+            pair_valid <= 1'b0;
             eeprom_word_count <= 7'd0;
             eeprom_high_byte <= 8'd0;
             eeprom_crc_work <= 32'hffffffff;
@@ -252,37 +262,78 @@ always_ff @(posedge clk) begin
                 // length as a terminal sentinel.
                 if (!terminal_sentinel)
                     range_error <= 1'b1;
-                else if (byte_count != IMAGE_END)
+                else if (byte_count != IMAGE_END || pair_valid)
                     length_error <= 1'b1;
+                pair_valid <= 1'b0;
             end else if (!sequence_ok) begin
                 sequence_error <= 1'b1;
+                pair_valid <= 1'b0;
             end else if (!can_accept) begin
                 overflow_error <= 1'b1;
             end else begin
-                accepted <= 1'b1;
-                byte_count <= byte_count + 27'd1;
                 if (in_eeprom) begin
-                    eeprom_crc_work <= crc32_byte(
-                        eeprom_crc_work, ioctl_dout
-                    );
-                    if (!ioctl_addr[0]) begin
-                        eeprom_high_byte <= ioctl_dout;
+                    // A half SDRAM word may never cross into the non-SDRAM
+                    // EEPROM seed region.
+                    if (pair_valid) begin
+                        overflow_error <= 1'b1;
+                        pair_valid <= 1'b0;
                     end else begin
-                        eeprom_seed_addr <= ioctl_addr[6:1];
-                        eeprom_seed_data <= {
-                            eeprom_high_byte, ioctl_dout
-                        };
-                        eeprom_seed_we <= 1'b1;
-                        eeprom_word_count <= eeprom_word_count + 7'd1;
+                        accepted <= 1'b1;
+                        byte_count <= byte_count + 27'd1;
+                        eeprom_crc_work <= crc32_byte(
+                            eeprom_crc_work, ioctl_dout
+                        );
+                        if (!ioctl_addr[0]) begin
+                            eeprom_high_byte <= ioctl_dout;
+                        end else begin
+                            eeprom_seed_addr <= ioctl_addr[6:1];
+                            eeprom_seed_data <= {
+                                eeprom_high_byte, ioctl_dout
+                            };
+                            eeprom_seed_we <= 1'b1;
+                            eeprom_word_count <= eeprom_word_count + 7'd1;
+                        end
                     end
+                end else if (!local_byte_addr[0]) begin
+                    if (pair_valid) begin
+                        // A second even byte means the previous half-word was
+                        // skipped or crossed a region boundary.
+                        overflow_error <= 1'b1;
+                        pair_valid <= 1'b0;
+                    end else begin
+                        pair_even_data <= ioctl_dout;
+                        pair_bank <= target_bank;
+                        pair_region <= target_region;
+                        pair_word_addr <= target_word_addr;
+                        pair_valid <= 1'b1;
+                        accepted <= 1'b1;
+                        byte_count <= byte_count + 27'd1;
+                    end
+                end else if (
+                    !pair_valid ||
+                    pair_bank != target_bank ||
+                    pair_region != target_region ||
+                    pair_word_addr != target_word_addr
+                ) begin
+                    // Odd-first, non-adjacent, or cross-region pairs are
+                    // protocol errors. Release the partial pair so an aborted
+                    // transfer cannot hold reset forever.
+                    overflow_error <= 1'b1;
+                    pair_valid <= 1'b0;
                 end else begin
-                    prog_ba <= target_bank;
-                    prog_addr <= in_graphics ?
-                        graphics_word_addr[AW-1:0] :
-                        local_word_addr[AW-1:0];
-                    prog_data <= {ioctl_dout, ioctl_dout};
-                    prog_mask <= write_low_lane ? 2'b10 : 2'b01;
+                    prog_ba <= pair_bank;
+                    prog_addr <= pair_word_addr;
+                    // Program/GFX source bytes are already big-endian.
+                    // JT6295 selects sample byte zero from the low SDRAM
+                    // lane, so OKI intentionally reverses the pair.
+                    prog_data <= pair_region == 2'd2 ?
+                        {ioctl_dout, pair_even_data} :
+                        {pair_even_data, ioctl_dout};
+                    prog_mask <= 2'b00;
                     prog_we <= 1'b1;
+                    pair_valid <= 1'b0;
+                    accepted <= 1'b1;
+                    byte_count <= byte_count + 27'd1;
                 end
             end
         end
@@ -291,6 +342,7 @@ always_ff @(posedge clk) begin
             if (
                 byte_count == IMAGE_END &&
                 eeprom_word_count == 7'd64 &&
+                !pair_valid &&
                 !range_error && !overflow_error &&
                 !sequence_error && !length_error &&
                 official_eeprom_crc(completed_eeprom_crc)
@@ -304,10 +356,12 @@ always_ff @(posedge clk) begin
             end else begin
                 length_error <= 1'b1;
                 image_valid <= 1'b0;
+                image_identity_valid <= 1'b0;
             end
+            pair_valid <= 1'b0;
         end
 
-        if (finalize_pending && !prog_we) begin
+        if (finalize_pending && !prog_we && !pair_valid) begin
             finalize_pending <= 1'b0;
             image_valid <= !range_error && !overflow_error &&
                            !sequence_error && !length_error;
