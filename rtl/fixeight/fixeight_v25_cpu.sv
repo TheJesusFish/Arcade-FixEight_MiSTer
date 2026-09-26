@@ -270,6 +270,9 @@ reg         txn_phase;
 reg  [19:0] txn_addr;
 reg  [15:0] txn_dout;
 reg  [15:0] txn_din;
+// Odd-byte index for the internal register/SFR access, carried alongside
+// txn_addr instead of being recomputed. See int_index1 below.
+reg  [ 8:0] txn_index1;
 
 wire escape_timing_done = escape_delay_count == 5'd0;
 wire base_arch_load = escape_timing_done &&
@@ -416,7 +419,14 @@ assign ext_ready = bus_state == BUS_ACK_EXT;
 assign cpu_ready = bus_state == BUS_ACK_CPU;
 
 wire [8:0] int_index0 = txn_addr[8:0];
-wire [8:0] int_index1 = txn_addr[8:0] + 9'd1;
+// int_index1 used to be txn_addr[8:0] + 9'd1. That incrementer sat in front
+// of the whole internal read decode -- the 9-bit carry had to resolve before
+// index[8] could pick register file vs SFR, index[7:5] the bank and index[4:1]
+// the offset -- and the resulting txn_addr -> cpu_din/txn_din path did not
+// close at 94.5 MHz. txn_addr is latched in BUS_IDLE and never changes for the
+// rest of the transaction, so the sum is carried in a register written at the
+// same moment and the decode now starts from a register output.
+wire [8:0] int_index1 = txn_index1;
 wire int_write0 = bus_state == BUS_INTERNAL && txn_write;
 wire int_write1 = int_write0 && txn_word;
 
@@ -965,6 +975,7 @@ always @(posedge clk) begin
         txn_internal <= 1'b0;
         txn_phase <= 1'b0;
         txn_addr <= 20'h00000;
+        txn_index1 <= 9'd1;
         txn_dout <= 16'h0000;
         txn_din <= 16'h0000;
         cpu_din <= 16'h0000;
@@ -978,6 +989,7 @@ always @(posedge clk) begin
         txn_internal <= 1'b0;
         txn_phase <= 1'b0;
         txn_addr <= 20'h00000;
+        txn_index1 <= 9'd1;
         txn_dout <= 16'h0000;
         txn_din <= 16'h0000;
         cpu_din <= 16'h0000;
@@ -991,6 +1003,7 @@ always @(posedge clk) begin
                     txn_word <= ext_word;
                     txn_io <= 1'b0;
                     txn_addr <= ext_addr;
+                    txn_index1 <= ext_addr[8:0] + 9'd1;
                     txn_dout <= ext_dout;
                     txn_internal <= internal_selected(ext_addr, 1'b1);
                     bus_wait_phase <= 5'd1;
@@ -1002,6 +1015,7 @@ always @(posedge clk) begin
                     txn_word <= cpu_word;
                     txn_io <= cpu_io;
                     txn_addr <= cpu_addr;
+                    txn_index1 <= cpu_addr[8:0] + 9'd1;
                     txn_dout <= cpu_dout;
                     txn_internal <= !cpu_io &&
                                     internal_selected(cpu_addr, cpu_data_cycle);
